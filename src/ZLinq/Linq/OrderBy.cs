@@ -110,10 +110,27 @@ namespace ZLinq.Linq
             , allows ref struct
 #endif
     {
+        // hold source array status
+        private class ArrayWrapper
+        {
+            public bool isDisposed => array == null;
+            public TSource[]? array = null;
+            public int length = 0;
+
+            public void Dispose()
+            {
+                if (array == null)
+                    return;
+                ArrayPool<TSource>.Shared.Return(array!);
+                array = null;
+                length = 0;
+            }
+        }
+
         TEnumerator source = source;
         OrderByComparable<TSource, TKey> comparable = new(keySelector, comparer, parent, descending); // boxed
 
-        TSource[]? sourceMap; // allocate
+        ArrayWrapper sourceMap = new ArrayWrapper();
         int index;
 
         public bool TryGetNonEnumeratedCount(out int count) => source.TryGetNonEnumeratedCount(out count);
@@ -160,35 +177,35 @@ namespace ZLinq.Linq
 
         public bool TryGetNext(out TSource current)
         {
-            if (sourceMap == null)
+            if (sourceMap.isDisposed)
             {
-                sourceMap = new ValueEnumerable<TEnumerator, TSource>(source).ToArray();
+                (sourceMap.array, sourceMap.length) = new ValueEnumerable<TEnumerator, TSource>(source).ToArrayPool();
+                var span = sourceMap.array.AsSpan(0, sourceMap.length);
 
                 if (IsAllowDirectSort())
                 {
-                    var dest = sourceMap.AsSpan();
                     if (descending)
                     {
-                        dest.Sort(DescendingDefaultComparer<TSource>.Default);
+                        span.Sort(DescendingDefaultComparer<TSource>.Default);
                     }
                     else
                     {
-                        dest.Sort();
+                        span.Sort();
                     }
                 }
                 else
                 {
-                    var (indexMap, size) = ValueEnumerable.Range(0, sourceMap.Length).ToArrayPool<FromRange, int>();
+                    var (indexMap, size) = ValueEnumerable.Range(0, sourceMap.length).ToArrayPool<FromRange, int>();
 
-                    using var comparer = comparable.GetComparer(sourceMap, null!);
-                    indexMap.AsSpan(0, size).Sort(sourceMap.AsSpan(), comparer);
+                    using var comparer = comparable.GetComparer(span, null!);
+                    indexMap.AsSpan(0, size).Sort(span, comparer);
                     ArrayPool<int>.Shared.Return(indexMap);
                 }
             }
 
-            if (index < sourceMap.Length)
+            if (index < sourceMap.length)
             {
-                current = sourceMap[index++];
+                current = sourceMap.array![index++];
                 return true;
             }
 
@@ -199,6 +216,7 @@ namespace ZLinq.Linq
         public void Dispose()
         {
             source.Dispose();
+            sourceMap.Dispose();
         }
 
         public OrderBy<TEnumerator, TSource, TSecondKey> ThenBy<TSecondKey>(Func<TSource, TSecondKey> keySelector, IComparer<TSecondKey>? comparer = null)
